@@ -64,6 +64,20 @@ void add_process(struct listProcess* list, pid_t pid, char** command) {
     }
 }
 
+struct Process* find(struct listProcess* list, pid_t pid) {
+	struct Process* current = list->head;
+	// struct Process* previous = NULL;
+
+	while (current != NULL && current->pid != pid) {
+		current = current->next;
+	}
+
+	if (current)
+		return current;
+	return NULL;
+}
+
+
 void remove_process(struct listProcess* list, pid_t pid) {
     struct Process* current = list->head;
     struct Process* previous = NULL;
@@ -124,7 +138,7 @@ void execute_pipe(struct cmdline *line) {
 
 	pipe(fds);
 
-	// first command
+	// first process
 	pid = fork();
 	if(pid == 0) { 
 		// connect stdout to the write end of the pipe
@@ -135,7 +149,7 @@ void execute_pipe(struct cmdline *line) {
 		execvp(line->seq[0][0], line->seq[0]);
 	}
 
-	// second command
+	// second process
 	pid = fork();
 	if(pid == 0) {
 		// connect stdin to the read end of the pipe
@@ -146,11 +160,69 @@ void execute_pipe(struct cmdline *line) {
 		execvp(line->seq[1][0],line->seq[1]);
 	}
 
-	// main
+	// main process
 	close(fds[0]);
 	close(fds[1]);
 	waitpid(pid,NULL,0);
 	waitpid(pid,NULL,0);
+}
+
+
+void execute_multiple_pipes(struct cmdline *line, struct listProcess* bg_ps) {
+	// count number of pipes
+	int nb_pipes = 0;
+	while (line->seq[nb_pipes]) {nb_pipes += 1;}
+	nb_pipes -= 1;	
+
+	pid_t pid;
+	int fds[2*nb_pipes];
+
+	// open pipes
+	for (int i = 0; i < nb_pipes; i++) {
+		pipe(fds + i*2);
+	}
+
+	// first process
+	pid = fork();
+	if(pid == 0) { 
+		// connect stdout to the write end of the pipe
+		dup2(fds[1], 1); 
+		redirect(line->in, NULL);
+		for (int j = 0; j < 2*nb_pipes; j++) {close(fds[j]);}
+		execvp(line->seq[0][0], line->seq[0]);
+	}
+
+	// intermediate processes
+	for (int i = 1; i < nb_pipes; i++) {  // nb_pipes + 1 == nb_commands
+		pid = fork();
+		if (pid == 0) {
+			dup2(fds[2*i+1], 1);
+			redirect(line->in, NULL);
+			dup2(fds[2*i - 2], 0);
+			redirect(NULL, line->out);
+			for (int j = 0; j < 2*nb_pipes; j++) {close(fds[j]);}
+			execvp(line->seq[i][0], line->seq[i]);
+		}
+	}
+
+	// last process
+	pid = fork();
+	if(pid == 0) {
+		// connect stdin to the read end of the pipe
+		dup2(fds[2*nb_pipes-2], 0);
+		redirect(NULL, line->out);
+		for (int j = 0; j < 2*nb_pipes; j++) {close(fds[j]);}
+		execvp(line->seq[nb_pipes][0],line->seq[nb_pipes]);
+	}
+
+	for (int j = 0; j < 2*nb_pipes; j++) {close(fds[j]);}
+
+	for (int i = 0; i < nb_pipes + 1; i++) {
+		if (!line->bg) {waitpid(pid, NULL, 0);}
+		else if (find(bg_ps, pid) == NULL){
+			add_process(bg_ps, pid, line->seq[nb_pipes]);
+		}
+	}
 }
 
 
@@ -278,12 +350,11 @@ int main() {
                                 printf("'%s' ", cmd[j]);
                         }
 			printf("\n");
-
-			if (l->seq[1] != NULL) //meaning there is a 2nd command -> exitence of pipe
-				execute_pipe(l);
-			else
-				execute(l, bg_process_list);
 		}
+		if (l->seq[1] != NULL) //meaning there is a 2nd command -> exitence of pipe
+			execute_multiple_pipes(l, bg_process_list);
+		else
+			execute(l, bg_process_list);
 	}
 	free(bg_process_list);
 }
